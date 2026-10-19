@@ -17,11 +17,11 @@
 <div class="max-w-md mx-auto flex justify-between items-center">
 <div>
 <h1 onclick="handleSecretTrigger()" class="text-xl font-bold flex items-center gap-2 cursor-pointer select-none"><i class="fa-solid fa-snowflake"></i> SisaDulu</h1>
-<p class="text-xs text-emerald-100">User: <span id="displayUserName" class="font-bold underline">Tamu</span></p>
+<p class="text-xs text-emerald-100" id="authStatus">Lihat pratinjau · belum login</p>
 </div>
 <div class="flex items-center gap-2">
 <button onclick="revealAdminPrompt()" class="text-emerald-200 hover:text-white text-sm p-1.5 rounded-lg" title="Akses Admin"><i class="fa-solid fa-shield-halved"></i></button>
-<button onclick="toggleUserModal()" class="bg-emerald-700 hover:bg-emerald-800 text-xs px-3 py-1.5 rounded-lg border border-emerald-500 flex items-center gap-1"><i class="fa-solid fa-user-pen"></i> Ganti Nama</button>
+<button id="authActionBtn" onclick="openAuthModal()" class="bg-white text-emerald-800 text-xs px-3 py-1.5 rounded-lg font-bold flex items-center gap-1"><i class="fa-solid fa-right-to-bracket"></i> Login / Daftar</button>
 </div>
 </div>
 </header>
@@ -110,6 +110,21 @@
 </div>
 </div>
 
+<div id="authModal" class="fixed inset-0 bg-black/60 hidden items-center justify-center p-4 z-[70]">
+<div class="bg-white w-full max-w-sm p-5 rounded-2xl space-y-3">
+<div class="flex items-center justify-between"><h2 class="font-bold text-lg text-gray-800">Masuk ke SisaDulu</h2><button onclick="closeAuthModal()" class="text-gray-500 p-2" aria-label="Tutup">✕</button></div>
+<p class="text-xs text-gray-500">Daftar dengan email atau masuk ke akun yang sudah ada.</p>
+<form id="authForm" onsubmit="submitAuth(event)" class="space-y-3">
+<label class="block text-xs font-semibold">Email<input id="authEmail" type="email" autocomplete="email" required class="mt-1 w-full text-sm p-3 border rounded-lg" placeholder="nama@email.com"></label>
+<label class="block text-xs font-semibold">Password<input id="authPassword" type="password" minlength="6" autocomplete="current-password" required class="mt-1 w-full text-sm p-3 border rounded-lg" placeholder="Minimal 6 karakter"></label>
+<p id="authError" class="text-xs text-rose-600" role="alert"></p>
+<button id="authSubmitBtn" type="submit" class="w-full bg-emerald-600 text-white font-bold p-3 rounded-lg">Masuk</button>
+</form>
+<div class="grid grid-cols-2 gap-2"><button onclick="setAuthMode('login')" class="border rounded-lg p-2 text-xs">Saya sudah punya akun</button><button onclick="setAuthMode('register')" class="border rounded-lg p-2 text-xs">Buat akun baru</button></div>
+<button onclick="resetPassword()" class="text-xs text-emerald-700 underline">Lupa password?</button>
+<button id="signOutBtn" onclick="signOutUser()" class="hidden w-full bg-gray-100 text-gray-700 p-2 rounded-lg text-xs">Keluar dari akun</button>
+</div></div>
+
 <div id="userModal" class="fixed inset-0 bg-black/50 hidden items-center justify-center p-4 z-50">
 <div class="bg-white w-full max-w-xs p-4 rounded-2xl space-y-3">
 <h3 class="font-bold text-sm text-gray-800">Identitas Pengguna</h3>
@@ -144,7 +159,6 @@ let myConversations = [], conversationUnsubscribe = null, messageUnsubscribe = n
 let activeConversationId = null, activeConversation = null;
 let messaging = null;
 
-document.getElementById('displayUserName').innerText = currentUser;
 document.getElementById('userDapurDisplay').innerText = currentUser;
 
 let userFoodKey = `kp_foods_${SINGLE_GROUP_ID}_${currentUser}`;
@@ -158,231 +172,232 @@ try {
     if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
     db = firebase.firestore();
 
-    firebase.auth().signInAnonymously().catch(err => {
-        console.error('Firebase login error:', err);
-        showShareError('Login gagal. Aktifkan Anonymous sign-in di Firebase Authentication.');
-    });
-
     firebase.auth().onAuthStateChanged(user => {
-        if (!user) return;
-        firebaseUser = user;
-        startSharedBoardListener();
-        startMyConversationsListener();
-        syncReminderData();
-        refreshNotificationStatus();
+        firebaseUser = user || null;
+        const status = document.getElementById('authStatus');
+        const button = document.getElementById('authActionBtn');
+        const signOut = document.getElementById('signOutBtn');
+        if (user && !user.isAnonymous) {
+            currentUser = localStorage.getItem('kp_user') || (user.email ? user.email.split('@')[0] : 'Dapur Saya');
+            localStorage.setItem('kp_user', currentUser);
+            status.textContent = user.email || 'Akun aktif';
+            button.innerHTML = '<i class="fa-solid fa-user-check"></i> Akun';
+            signOut.classList.remove('hidden');
+            startSharedBoardListener();
+            startMyConversationsListener();
+            syncReminderData();
+            refreshNotificationStatus();
+        } else {
+            status.textContent = user && user.isAnonymous ? 'Pratinjau publik · belum login' : 'Lihat pratinjau · belum login';
+            button.innerHTML = '<i class="fa-solid fa-right-to-bracket"></i> Login / Daftar';
+            signOut.classList.add('hidden');
+            if (shareUnsubscribe) shareUnsubscribe();
+            if (conversationUnsubscribe) conversationUnsubscribe();
+            shareUnsubscribe = conversationUnsubscribe = null;
+            if (user && user.isAnonymous) { startSharedBoardListener(); }
+            else { shareReady = false; shareBoard = []; render(); }
+        }
     });
 } catch (err) {
     console.error(err);
     showShareError('Firebase belum siap. Periksa konfigurasi dan koneksi.');
 }
 
-async function syncReminderData() {
-    if (!db || !firebaseUser) return;
+let authMode = 'login';
+function openAuthModal() {
+    document.getElementById('authModal').classList.remove('hidden');
+    document.getElementById('authModal').classList.add('flex');
+    document.getElementById('authError').textContent = '';
+    document.getElementById('signOutBtn').classList.toggle('hidden', !(firebaseUser && !firebaseUser.isAnonymous));
+    setAuthMode(firebaseUser && !firebaseUser.isAnonymous ? 'login' : authMode);
+}
+function closeAuthModal() {
+    document.getElementById('authModal').classList.add('hidden');
+    document.getElementById('authModal').classList.remove('flex');
+}
+function setAuthMode(mode) {
+    authMode = mode;
+    document.getElementById('authSubmitBtn').textContent = mode === 'register' ? 'Buat Akun' : 'Masuk';
+    document.getElementById('authPassword').autocomplete = mode === 'register' ? 'new-password' : 'current-password';
+    document.getElementById('authError').textContent = '';
+}
+    async function submitAuth(event) {
+    event.preventDefault();
+
+    const email = document.getElementById('authEmail').value.trim();
+    const password = document.getElementById('authPassword').value;
+    const errorEl = document.getElementById('authError');
+    const submitBtn = document.getElementById('authSubmitBtn');
+
+    errorEl.textContent = '';
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Memproses...';
+
     try {
-        await db.collection('kpReminderData').doc(firebaseUser.uid).set({
-            uid: firebaseUser.uid,
-            owner: currentUser,
-            foods: foods.map(f => ({ id: String(f.id), name: f.name, expiry: f.expiry, category: f.category || '', status: f.status || 'fresh' })),
-            updatedAtMs: Date.now()
-        }, { merge: true });
-    } catch (err) {
-        console.warn('Reminder data sync failed. Check Firestore Rules for kpReminderData.', err);
+        if (authMode === 'register') {
+            await firebase.auth().createUserWithEmailAndPassword(email, password);
+        } else {
+            await firebase.auth().signInWithEmailAndPassword(email, password);
+        }
+
+        closeAuthModal();
+        document.getElementById('authForm').reset();
+    } catch (error) {
+        console.error('Authentication error:', error);
+
+        const messages = {
+            'auth/email-already-in-use': 'Email ini sudah terdaftar. Silakan login.',
+            'auth/invalid-email': 'Format email tidak valid.',
+            'auth/weak-password': 'Password terlalu lemah. Gunakan minimal 6 karakter.',
+            'auth/user-not-found': 'Akun tidak ditemukan. Periksa email atau daftar akun baru.',
+            'auth/wrong-password': 'Password salah. Coba lagi.',
+            'auth/invalid-credential': 'Email atau password salah.',
+            'auth/too-many-requests': 'Terlalu banyak percobaan. Coba lagi nanti.',
+            'auth/network-request-failed': 'Koneksi internet bermasalah. Coba lagi.',
+            'auth/operation-not-allowed': 'Login email/password belum diaktifkan di Firebase Authentication.'
+        };
+
+        errorEl.textContent = messages[error.code] || 'Login gagal: ' + error.message;
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = authMode === 'register' ? 'Buat Akun' : 'Masuk';
     }
+}
+
+async function resetPassword() {
+    const email = document.getElementById('authEmail').value.trim();
+
+    if (!email) {
+        document.getElementById('authError').textContent =
+            'Masukkan email terlebih dahulu untuk menerima tautan reset password.';
+        document.getElementById('authEmail').focus();
+        return;
+    }
+
+    try {
+        await firebase.auth().sendPasswordResetEmail(email);
+        document.getElementById('authError').className = 'text-xs text-emerald-700';
+        document.getElementById('authError').textContent =
+            'Jika email terdaftar, tautan reset password akan dikirim. Periksa inbox dan spam.';
+    } catch (error) {
+        console.error(error);
+        document.getElementById('authError').className = 'text-xs text-rose-600';
+        document.getElementById('authError').textContent =
+            'Gagal mengirim email reset. Periksa alamat email dan pengaturan Firebase.';
+    }
+}
+
+async function signOutUser() {
+    try {
+        await firebase.auth().signOut();
+        closeAuthModal();
+        alert('Kamu sudah keluar dari akun.');
+    } catch (error) {
+        console.error(error);
+        alert('Gagal keluar. Periksa koneksi internet lalu coba lagi.');
+    }
+}
+
+function requireLogin(actionName = 'menggunakan fitur ini') {
+    if (firebaseUser && !firebaseUser.isAnonymous) {
+        return true;
+    }
+
+    alert('Silakan login atau daftar terlebih dahulu untuk ' + actionName + '.');
+    openAuthModal();
+    return false;
 }
 
 function refreshNotificationStatus() {
     const el = document.getElementById('notificationStatus');
     const btn = document.getElementById('enableNotificationsBtn');
+
     if (!el || !btn) return;
+
+    if (!firebaseUser || firebaseUser.isAnonymous) {
+        el.textContent = 'Login terlebih dahulu untuk mengaktifkan pengingat pada akunmu.';
+        btn.textContent = 'Login untuk Mengaktifkan';
+        return;
+    }
+
     if (!('Notification' in window) || !('serviceWorker' in navigator)) {
         el.textContent = 'Browser ini belum mendukung notifikasi web. Di iPhone, tambahkan situs ke Home Screen dan buka dari ikon tersebut.';
         btn.disabled = true;
         btn.classList.add('opacity-50');
         return;
     }
+
+    btn.disabled = false;
+    btn.classList.remove('opacity-50');
+
     if (Notification.permission === 'granted') {
-        el.textContent = 'Izin notifikasi sudah diberikan. Jika pengingat belum aktif, tekan tombol untuk mendaftarkan perangkat.';
+        el.textContent = 'Izin notifikasi sudah diberikan. Tekan tombol untuk memeriksa pendaftaran perangkat.';
         btn.textContent = 'Aktifkan / Periksa Notifikasi';
     } else if (Notification.permission === 'denied') {
-        el.textContent = 'Izin notifikasi diblokir. Ubah izin situs di pengaturan browser, lalu coba lagi.';
+        el.textContent = 'Izin notifikasi diblokir. Ubah izin situs di pengaturan browser.';
+        btn.textContent = 'Periksa Izin Notifikasi';
+    } else {
+        el.textContent = 'Notifikasi belum diaktifkan di perangkat ini.';
+        btn.textContent = 'Aktifkan Notifikasi';
+    }
+}
+
+async function syncReminderData() {
+    if (!db || !firebaseUser || firebaseUser.isAnonymous) return;
+
+    try {
+        await db.collection('kpReminderData').doc(firebaseUser.uid).set({
+            uid: firebaseUser.uid,
+            owner: currentUser,
+            foods: foods.map(f => ({
+                id: String(f.id),
+                name: f.name,
+                expiry: f.expiry,
+                category: f.category || '',
+                status: f.status || 'fresh'
+            })),
+            updatedAtMs: Date.now()
+        }, { merge: true });
+    } catch (err) {
+        console.warn('Reminder data sync failed. Check Firestore Rules.', err);
     }
 }
 
 async function enableExpiryNotifications() {
+    if (!requireLogin('mengaktifkan pengingat kedaluwarsa')) return;
+
     const btn = document.getElementById('enableNotificationsBtn');
     const status = document.getElementById('notificationStatus');
-    if (!firebaseUser || !db) {
-        status.textContent = 'Menghubungkan ke Firebase. Tunggu sebentar lalu coba lagi.';
-        return;
-    }
+
     if (!('Notification' in window) || !('serviceWorker' in navigator)) {
-        status.textContent = 'Browser ini belum mendukung notifikasi web. Di iPhone, tambahkan situs ke Home Screen dan buka dari ikon tersebut.';
+        status.textContent = 'Browser ini belum mendukung notifikasi web.';
         return;
     }
+
     btn.disabled = true;
     status.textContent = 'Meminta izin notifikasi...';
+
     try {
         const permission = await Notification.requestPermission();
+
         if (permission !== 'granted') {
-            status.textContent = 'Izin notifikasi belum diberikan. Kamu bisa mengaktifkannya lewat pengaturan browser.';
+            status.textContent = 'Izin notifikasi belum diberikan.';
             return;
         }
+
         const registration = await navigator.serviceWorker.register('/firebase-messaging-sw.js');
         await navigator.serviceWorker.ready;
+
         if (!messaging) messaging = firebase.messaging();
-        const token = await messaging.getToken({ vapidKey: PUBLIC_VAPID_KEY, serviceWorkerRegistration: registration });
-        if (!token) throw new Error('Token not returned by Firebase Messaging');
-        const deviceIdKey = 'kp_push_device_id';
-        let deviceId = localStorage.getItem(deviceIdKey);
-        if (!deviceId) {
-            deviceId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2));
-            localStorage.setItem(deviceIdKey, deviceId);
-        }
-        await db.collection('kpPushTokens').doc(firebaseUser.uid + '_' + deviceId).set({
-            uid: firebaseUser.uid,
-            token,
-            owner: currentUser,
-            deviceId,
-            platform: /iPhone|iPad|iPod/.test(navigator.userAgent) ? 'iOS' : 'web',
-            updatedAtMs: Date.now()
-        }, { merge: true });
-        await syncReminderData();
-        status.textContent = 'Notifikasi aktif di perangkat ini. Pengingat terjadwal diproses oleh server setiap hari.';
-        btn.textContent = 'Notifikasi Aktif';
-    } catch (err) {
-        console.error('Push setup failed:', err);
-        status.textContent = 'Belum berhasil mengaktifkan notifikasi. Periksa Firebase Messaging, service worker, dan Firestore Rules.';
-    } finally {
-        btn.disabled = false;
-        refreshNotificationStatus();
-    }
-}
 
-function escapeHtml(value) {
-    return String(value ?? '').replace(/[&<>"']/g, ch => ({
-        '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
-    }[ch]));
-}
-
-function showShareError(message) {
-    const el = document.getElementById('shareList');
-    if (el) el.innerHTML = `<p class="text-rose-600 text-xs">${escapeHtml(message)}</p>`;
-}
-
-function startSharedBoardListener() {
-    if (!db || !firebaseUser) return;
-    if (shareUnsubscribe) shareUnsubscribe();
-
-    shareUnsubscribe = db.collection('foodShares')
-        .where('groupId', '==', SINGLE_GROUP_ID)
-        .onSnapshot(snapshot => {
-            shareBoard = snapshot.docs.map(doc => ({
-                id: doc.id, ...doc.data()
-            })).sort((a,b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
-
-            shareReady = true;
-            render();
-            updateAdminLiveStats();
-        }, err => {
-            console.error(err);
-            showShareError('Papan berbagi gagal dimuat. Periksa Firestore Rules.');
+        const token = await messaging.getToken({
+            vapidKey: PUBLIC_VAPID_KEY,
+            serviceWorkerRegistration: registration
         });
-}
 
-let clickCount = 0;
-function handleSecretTrigger() {
-    clickCount++;
-    if (clickCount >= 5) {
-        clickCount = 0;
-        revealAdminPrompt();
-    }
-}
-
-function revealAdminPrompt() {
-    const pin = prompt("Masukkan PIN Admin:");
-    if (pin === ADMIN_PIN) {
-        document.getElementById('adminPanelSection').classList.remove('hidden');
-        updateAdminLiveStats();
-    } else if (pin !== null) {
-        alert("PIN salah.");
-    }
-}
-
-function hideAdminPanel() {
-    document.getElementById('adminPanelSection').classList.add('hidden');
-}
-
-function updateAdminLiveStats() {
-    document.getElementById('adminUserActive').innerText = currentUser;
-    document.getElementById('adminStokActive').innerText =
-        document.getElementById('statTotal').innerText + ' Item';
-    document.getElementById('adminWarningActive').innerText =
-        document.getElementById('statWarning').innerText + ' Item';
-    document.getElementById('adminCompostActive').innerText = foodCompostCount + ' Item';
-    document.getElementById('adminWasteActive').innerText = foodWasteCount + ' Item';
-    document.getElementById('adminSharedActive').innerText = shareBoard.length + ' Item';
-}
-
-function saveToStorage() {
-    localStorage.setItem(userFoodKey, JSON.stringify(foods));
-    localStorage.setItem(userWasteKey, foodWasteCount);
-    localStorage.setItem(userCompostKey, foodCompostCount);
-    syncReminderData();
-    render();
-    updateAdminLiveStats();
-}
-
-function handleAddFood(e) {
-    e.preventDefault();
-    const name = document.getElementById('foodName').value.trim();
-    const expiry = document.getElementById('expiryDate').value;
-    const category = document.getElementById('foodCategory').value;
-    if (!name || !expiry) return;
-
-    foods.push({
-        id: Date.now(), name, expiry, category,
-        status: 'fresh', checked: false
-    });
-    document.getElementById('addFoodForm').reset();
-    saveToStorage();
-}
-
-function getDaysDiff(expiryDateStr) {
-    const today = new Date();
-    today.setHours(0,0,0,0);
-    const exp = new Date(expiryDateStr);
-    exp.setHours(0,0,0,0);
-    return Math.ceil((exp - today) / 86400000);
-}
-
-function processExpiredAction(id, actionType) {
-    const idx = foods.findIndex(f => f.id === id);
-    if (idx === -1) return;
-    const itemName = foods[idx].name;
-    foods[idx].checked = true;
-
-    if (actionType === 'layak') {
-        foods[idx].status = 'priority';
-        alert(`"${itemName}" ditandai masih layak.`);
-    } else if (actionType === 'pupuk') {
-        foods[idx].status = 'compost';
-        foodCompostCount++;
-        alert(`"${itemName}" dialihkan ke kompos.`);
-    } else if (actionType === 'waste') {
-        foods[idx].status = 'waste';
-        foodWasteCount++;
-        alert(`"${itemName}" dicatat sebagai Food Waste.`);
-    }
-    saveToStorage();
-}
-
-function deleteFood(id) {
-    foods = foods.filter(f => f.id !== id);
-    saveToStorage();
-}
-
-function startMyConversationsListener() {
-    if (!db || !firebaseUser) return;
+        if (!token) throw new Error('Token not returned by Firebase Messaging
+         function startMyConversationsListener() {
+    if (!db || !firebaseUser || firebaseUser.isAnonymous) return;
     if (conversationUnsubscribe) conversationUnsubscribe();
 
     conversationUnsubscribe = db.collection('foodConversations')
@@ -390,7 +405,7 @@ function startMyConversationsListener() {
         .onSnapshot(snapshot => {
             myConversations = snapshot.docs.map(doc => ({
                 id: doc.id, ...doc.data()
-            })).sort((a,b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0));
+            })).sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0));
             renderConversationList();
         }, err => {
             console.error(err);
@@ -400,6 +415,8 @@ function startMyConversationsListener() {
 }
 
 function openMyMessages() {
+    if (!requireLogin('membuka pesan')) return;
+
     document.getElementById('chatModal').classList.remove('hidden');
     document.getElementById('chatModal').classList.add('flex');
     renderConversationList();
@@ -408,6 +425,7 @@ function openMyMessages() {
 function closeChat() {
     document.getElementById('chatModal').classList.add('hidden');
     document.getElementById('chatModal').classList.remove('flex');
+
     if (messageUnsubscribe) messageUnsubscribe();
     messageUnsubscribe = null;
     activeConversationId = null;
@@ -416,10 +434,12 @@ function closeChat() {
 
 function renderConversationList() {
     const el = document.getElementById('conversationList');
-    if (!firebaseUser) {
-        el.innerHTML = '<p class="text-gray-500">Menghubungkan akun...</p>';
+
+    if (!firebaseUser || firebaseUser.isAnonymous) {
+        el.innerHTML = '<p class="text-gray-500">Login untuk melihat pesan.</p>';
         return;
     }
+
     if (!myConversations.length) {
         el.innerHTML = '<p class="text-gray-500">Belum ada percakapan. Tekan “Saya tertarik” pada tawaran makanan.</p>';
         return;
@@ -429,6 +449,7 @@ function renderConversationList() {
         const other = c.ownerUid === firebaseUser.uid
             ? (c.interestedName || 'Peminat')
             : (c.ownerName || 'Pemilik');
+
         const selected = c.id === activeConversationId
             ? 'border-teal-500 bg-teal-50'
             : 'border-gray-200 bg-white';
@@ -442,14 +463,13 @@ function renderConversationList() {
 }
 
 async function startInterest(shareId) {
-    if (!firebaseUser || !db) {
-        alert('Sedang menghubungkan layanan pesan. Coba lagi sebentar.');
-        return;
-    }
+    if (!requireLogin('menghubungi pemilik makanan')) return;
+    if (!db || !firebaseUser) return;
 
     const offer = shareBoard.find(x => x.id === shareId);
     if (!offer) return alert('Tawaran makanan tidak ditemukan.');
     if (offer.ownerUid === firebaseUser.uid) return openMyMessages();
+
     if ((offer.status || 'Tersedia') !== 'Tersedia') {
         return alert('Makanan ini tidak lagi tersedia.');
     }
@@ -462,6 +482,7 @@ async function startInterest(shareId) {
         );
 
         let convId;
+
         if (existing) {
             convId = existing.id;
         } else {
@@ -481,6 +502,7 @@ async function startInterest(shareId) {
             });
 
             convId = ref.id;
+
             await db.collection('foodConversations').doc(convId)
                 .collection('messages').add({
                     senderUid: firebaseUser.uid,
@@ -501,19 +523,21 @@ async function startInterest(shareId) {
         setTimeout(() => openConversation(convId), 250);
     } catch (err) {
         console.error(err);
-        alert('Pesan gagal dibuat. Periksa Firestore Rules untuk foodConversations dan messages.');
+        alert('Pesan gagal dibuat. Periksa Firestore Rules.');
     }
 }
 
 function openConversation(id) {
     const c = myConversations.find(x => x.id === id);
-    if (!c || !firebaseUser) return;
+    if (!c || !firebaseUser || firebaseUser.isAnonymous) return;
 
     activeConversationId = id;
     activeConversation = c;
+
     document.getElementById('chatTitle').innerText = c.foodName || 'Pesan Food Sharing';
     document.getElementById('chatSubtitle').innerText =
         'Atur waktu pengambilan dan berbagi alamat secara pribadi.';
+
     renderConversationList();
 
     if (messageUnsubscribe) messageUnsubscribe();
@@ -525,14 +549,17 @@ function openConversation(id) {
         .collection('messages').orderBy('createdAtMs', 'asc')
         .onSnapshot(snapshot => {
             const messages = snapshot.docs.map(d => d.data());
+
             messagesEl.innerHTML = messages.length ? messages.map(m => {
                 const mine = m.senderUid === firebaseUser.uid;
+
                 return `<div class="flex ${mine ? 'justify-end' : 'justify-start'}">
                     <div class="max-w-[88%] rounded-xl px-3 py-2 ${mine ? 'bg-emerald-100 text-emerald-950' : 'bg-white border text-gray-800'}">
                     <div class="font-bold text-[10px] mb-1">${escapeHtml(m.senderName || 'Pengguna')}</div>
                     <div class="whitespace-pre-wrap break-words">${escapeHtml(m.text)}</div>
                     </div></div>`;
             }).join('') : '<p class="text-gray-400">Belum ada pesan.</p>';
+
             messagesEl.scrollTop = messagesEl.scrollHeight;
         }, err => {
             console.error(err);
@@ -542,113 +569,18 @@ function openConversation(id) {
 
 async function sendChatMessage(event) {
     event.preventDefault();
+
+    if (!requireLogin('mengirim pesan')) return;
+
     const input = document.getElementById('chatInput');
     const text = input.value.trim();
+
     if (!text || !activeConversationId || !activeConversation || !firebaseUser) return;
-    if (!activeConversation.participantUids.includes(firebaseUser.uid)) {
-        alert('Kamu tidak memiliki akses ke percakapan ini.');
-        return;
-    }
 
-    input.disabled = true;
-    try {
-        const ref = db.collection('foodConversations').doc(activeConversationId);
-        await ref.collection('messages').add({
-            senderUid: firebaseUser.uid,
-            senderName: currentUser,
-            text,
-            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-            createdAtMs: Date.now()
-        });
-        await ref.update({
-            lastMessage: text.slice(0,160),
-            updatedAtMs: Date.now(),
-            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-        });
-        input.value = '';
-    } catch (err) {
-        console.error(err);
-        alert('Pesan gagal dikirim. Periksa koneksi dan Firestore Rules.');
-    } finally {
-        input.disabled = false;
-        input.focus();
-    }
-}
+    if (!activeConversation.participantUids.includes
+        function handleOlahSisaModal() {
+    if (!requireLogin('mengolah stok makanan')) return;
 
-async function shareFoodItem(id) {
-    const item = foods.find(f => f.id === id);
-    if (!item) return;
-
-    if (!db || !firebaseUser) {
-        alert('Food Sharing belum tersambung. Periksa Firebase.');
-        return;
-    }
-
-    if (!confirm(`Bagikan "${item.name}" ke papan publik? Nama dapur dan tanggal kedaluwarsa akan terlihat oleh pengguna lain.`)) return;
-
-    try {
-        await db.collection('foodShares').add({
-            groupId: SINGLE_GROUP_ID,
-            name: item.name,
-            category: item.category || 'Makanan',
-            expiry: item.expiry || '',
-            owner: currentUser,
-            ownerUid: firebaseUser.uid,
-            status: 'Tersedia',
-            createdAt: firebase.firestore.FieldValue.serverTimestamp(),
-            createdAtMs: Date.now(),
-            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-        });
-
-        foods = foods.filter(f => f.id !== id);
-        saveToStorage();
-        alert(`"${item.name}" sudah ditawarkan di papan publik.`);
-    } catch (err) {
-        console.error(err);
-        alert('Gagal membagikan makanan. Periksa Firestore Rules.');
-    }
-}
-
-async function updateShareStatus(id, status) {
-    const share = shareBoard.find(s => s.id === id);
-    if (!share || !firebaseUser) return;
-
-    if (share.ownerUid !== firebaseUser.uid) {
-        alert('Hanya pemilik tawaran yang bisa mengubah status.');
-        return;
-    }
-
-    try {
-        await db.collection('foodShares').doc(id).update({
-            status,
-            updatedAt: firebase.firestore.FieldValue.serverTimestamp()
-        });
-    } catch (err) {
-        console.error(err);
-        alert('Status gagal diperbarui.');
-    }
-}
-
-async function deleteSharedOffer(id) {
-    const share = shareBoard.find(s => s.id === id);
-    if (!share || !firebaseUser) return;
-
-    if (share.ownerUid !== firebaseUser.uid) {
-        alert('Hanya pemilik tawaran yang bisa menghapusnya.');
-        return;
-    }
-
-    if (!confirm(`Hapus tawaran "${share.name}"?`)) return;
-
-    try {
-        await db.collection('foodShares').doc(id).delete();
-    } catch (err) {
-        console.error(err);
-        alert('Tawaran gagal dihapus.');
-    }
-}
-
-function handleOlahSisaModal() {
     const activeFoods = foods.filter(f =>
         f.status !== 'waste' && f.status !== 'compost'
     );
@@ -658,25 +590,26 @@ function handleOlahSisaModal() {
         return;
     }
 
-    let text = 'REKOMENDASI OLAH SISA:\n\n';
+    let result = 'REKOMENDASI OLAH SISA:\n\n';
 
     activeFoods.forEach(item => {
         const days = getDaysDiff(item.expiry);
-        text += `• ${item.name} (${days <= 0 ? 'Kedaluwarsa' : days + ' hari lagi'}):\n`;
+        result += `• ${item.name} (${days <= 0 ? 'Lewat tanggal' : days + ' hari lagi'}):\n`;
 
         if (item.name.toLowerCase().includes('nasi')) {
-            text += '  Olah jadi nasi goreng atau kerupuk gendar.\n';
+            result += '  Olah menjadi nasi goreng atau kerupuk gendar.\n';
         } else if (item.name.toLowerCase().includes('roti')) {
-            text += '  Olah jadi puding roti atau roti bakar.\n';
+            result += '  Olah menjadi puding roti atau roti bakar.\n';
         } else {
-            text += '  Pertimbangkan tumis atau sup.\n';
+            result += '  Pertimbangkan tumis atau sup.\n';
         }
     });
 
-    alert(text);
+    alert(result);
 }
 
 function handleBagiSisaModal() {
+    if (!requireLogin('membagikan makanan')) return;
     alert('Pilih ikon bagikan di samping makanan pada bagian Isi Kulkas Saya.');
 }
 
@@ -745,7 +678,7 @@ function render() {
     const shareList = document.getElementById('shareList');
 
     if (!shareReady) {
-        shareList.innerHTML = '<p class="text-gray-400 text-xs">Menghubungkan papan berbagi...</p>';
+        shareList.innerHTML = '<p class="text-gray-400 text-xs">Papan berbagi akan dimuat setelah terhubung.</p>';
         return;
     }
 
@@ -757,7 +690,8 @@ function render() {
     shareList.innerHTML = '';
 
     shareBoard.forEach(s => {
-        const isOwner = firebaseUser && s.ownerUid === firebaseUser.uid;
+        const isOwner = firebaseUser && !firebaseUser.isAnonymous &&
+            s.ownerUid === firebaseUser.uid;
         const status = s.status || 'Tersedia';
 
         shareList.innerHTML += `
@@ -774,7 +708,12 @@ function render() {
                 <span class="text-[10px] px-2 py-1 rounded font-bold ${status === 'Tersedia' ? 'bg-teal-200' : 'bg-gray-200'}">${escapeHtml(status)}</span>
             </div>
 
-            ${!isOwner && status === 'Tersedia' ? `
+            ${!firebaseUser || firebaseUser.isAnonymous ? `
+            <button onclick="openAuthModal()" class="w-full bg-teal-600 text-white text-[11px] font-bold py-2 rounded-lg">
+                Login untuk menghubungi pemilik
+            </button>` : ''}
+
+            ${firebaseUser && !firebaseUser.isAnonymous && !isOwner && status === 'Tersedia' ? `
             <button onclick="startInterest('${s.id}')" class="w-full bg-teal-600 text-white text-[11px] font-bold py-2 rounded-lg">
                 Saya tertarik — hubungi pemilik
             </button>` : ''}
@@ -790,22 +729,31 @@ function render() {
 }
 
 function toggleUserModal() {
+    if (!requireLogin('mengubah identitas dapur')) return;
+
     document.getElementById('userInput').value = currentUser;
-    document.getElementById('userModal').classList.toggle('hidden');
-    document.getElementById('userModal').classList.toggle('flex');
+    document.getElementById('userModal').classList.remove('hidden');
+    document.getElementById('userModal').classList.add('flex');
 }
 
 function saveUserProfile() {
+    if (!requireLogin('mengubah identitas dapur')) return;
+
     const user = document.getElementById('userInput').value.trim();
 
-    if (user) {
-        localStorage.setItem('kp_user', user);
-        location.reload();
+    if (!user) {
+        alert('Nama dapur tidak boleh kosong.');
+        return;
     }
+
+    localStorage.setItem('kp_user', user);
+    location.reload();
 }
 
 function downloadAdminReportFile() {
-    const text = `LAPORAN KULKAS PINTER
+    if (!requireLogin('mengunduh laporan')) return;
+
+    const text = `LAPORAN SISADULU
 Nama pengguna: ${currentUser}
 Tanggal: ${new Date().toLocaleDateString('id-ID')}
 Stok aktif: ${document.getElementById('statTotal').innerText}
@@ -814,14 +762,16 @@ Kompos: ${foodCompostCount}
 Food Waste: ${foodWasteCount}
 Tawaran Food Sharing: ${shareBoard.length}`;
 
-    const blob = new Blob([text], {type:'text/plain'});
+    const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
     const anchor = document.createElement('a');
-    anchor.download = 'Laporan_Kulkas_Pinter.txt';
+    anchor.download = 'Laporan_SisaDulu.txt';
     anchor.href = URL.createObjectURL(blob);
     anchor.click();
+    URL.revokeObjectURL(anchor.href);
 }
 
 render();
+refreshNotificationStatus();
 </script>
 </body>
 </html>
